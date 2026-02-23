@@ -155,7 +155,7 @@ class FileListDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-class FileList(QListView):
+class FileList(QTreeView):
     nothingClicked = Signal()
     """ Only emitted if the widget has focus. """
     selectedCountChanged = Signal(int)
@@ -197,12 +197,14 @@ class FileList(QListView):
         self.commitId = NULL_OID
         self._selectionBackup = []
 
+        self.header().hide()
+        self.setIndentation(0)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         iconSize = self.fontMetrics().height()
         self.setIconSize(QSize(iconSize, iconSize))
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # prevent editing text after double-clicking
-        self.setUniformItemSizes(True)  # potential perf boost with many files
+        self.setUniformRowHeights(True)  # potential perf boost with many files
 
         searchBarPlaceholder = toLengthVariants(_("Find a file by path|Find file"))
         self.searchBar = SearchBar(self, searchBarPlaceholder)

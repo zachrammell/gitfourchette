@@ -212,7 +212,7 @@ def appendShortcutToToolTip(widget: QWidget, shortcut: ShortcutKeys, singleLine=
 
 
 def itemViewVisibleRowRange(view: QAbstractItemView):
-    assert isinstance(view, QListView)
+    #assert isinstance(view, QListView)
     model = view.model()  # use the view's top-level model to only search filtered rows
 
     rect = view.viewport().contentsRect()
