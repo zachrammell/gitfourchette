@@ -6,7 +6,7 @@
 
 import logging
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, overload
 
 from gitfourchette import settings
 from gitfourchette.gitdriver import GitDelta
@@ -132,10 +132,11 @@ def fileTooltip(repo: Repo, delta: GitDelta, navContext: NavContext, isCounterpa
     return text
 
 
-class FileListModel(QAbstractListModel):
+class FileListModel(QAbstractItemModel):
     class Role:
         Delta = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 0)
         FilePath = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 1)
+        Folder = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 2)
 
     deltas: list[GitDelta]
     fileRows: dict[str, int]
@@ -176,6 +177,23 @@ class FileListModel(QAbstractListModel):
             self.deltas.append(delta)
 
         self.endResetModel()
+
+    def index(self, row: int, column: int = 0, parent: QModelIndex = QModelIndex_default) -> QModelIndex:
+        return self.createIndex(row, column)
+
+    @overload
+    def parent(self, child: QModelIndex) -> QModelIndex: ...
+
+    @overload
+    def parent(self) -> QObject | None: ...
+
+    def parent(self, child: QModelIndex | None = None):
+        if isinstance(child, QModelIndex):
+            return QModelIndex_default
+        return super().parent()
+
+    def columnCount(self, parent: QModelIndex = QModelIndex_default) -> int:
+        return 1
 
     def rowCount(self, parent: QModelIndex = QModelIndex_default) -> int:
         return len(self.deltas)
