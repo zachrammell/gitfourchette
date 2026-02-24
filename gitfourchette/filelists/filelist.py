@@ -6,7 +6,6 @@
 
 import os
 from collections.abc import Callable, Generator, Iterable
-from contextlib import suppress
 
 from gitfourchette import settings
 from gitfourchette.application import GFApplication
@@ -81,14 +80,17 @@ class FileListDelegate(QStyledItemDelegate):
         secondColor = QPalette.ColorRole.WindowText
 
         # Determine split based on style
-        isFileNameFirst = settings.prefs.pathDisplayStyle == PathDisplayStyle.FileNameFirst
-
-        if isFileNameFirst:
+        if settings.prefs.pathDisplayStyle == PathDisplayStyle.FileNameFirst:
             try:
                 firstPortion, secondPortion = text.split('\0')
             except ValueError:
                 firstPortion, secondPortion = text, ""
 
+            firstColor = QPalette.ColorRole.WindowText
+            secondColor = QPalette.ColorRole.PlaceholderText
+
+        elif settings.prefs.pathDisplayStyle == PathDisplayStyle.Tree:
+            firstPortion, secondPortion = text, ""
             firstColor = QPalette.ColorRole.WindowText
             secondColor = QPalette.ColorRole.PlaceholderText
 
@@ -192,13 +194,13 @@ class FileList(QTreeView):
         flModel = FileListModel(self, navContext)
         self.setModel(flModel)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
         self.navContext = navContext
         self.commitId = NULL_OID
         self._selectionBackup = []
 
         self.header().hide()
-        self.setIndentation(0)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         iconSize = self.fontMetrics().height()
         self.setIconSize(QSize(iconSize, iconSize))
@@ -226,7 +228,12 @@ class FileList(QTreeView):
     def refreshPrefs(self):
         self.setVerticalScrollMode(settings.prefs.listViewScrollMode)
         nameFirst = settings.prefs.pathDisplayStyle == PathDisplayStyle.FileNameFirst
-        self.setTextElideMode(Qt.TextElideMode.ElideRight if nameFirst else Qt.TextElideMode.ElideMiddle)
+        tree = settings.prefs.pathDisplayStyle == PathDisplayStyle.Tree
+        self.setTextElideMode(Qt.TextElideMode.ElideRight if nameFirst or tree else Qt.TextElideMode.ElideMiddle)
+        if tree:
+            self.resetIndentation()
+        else:
+            self.setIndentation(0)
 
     @property
     def repo(self) -> Repo:
@@ -249,6 +256,7 @@ class FileList(QTreeView):
 
     def setContents(self, deltas: Iterable[GitDelta]):
         self.flModel.setContents(deltas)
+        self.expandAll()
         self.updateFocusPolicy()
         self.searchBar.reevaluateSearchTerm()
 
@@ -292,7 +300,7 @@ class FileList(QTreeView):
             name = englishTitleCase(TrTables.enum(pds))
             return ActionDef(name, setIt, checkState=isCurrent)
 
-        n = len(deltas)
+        n = len(list(self.selectedPaths()))
 
         actions = [
             ActionDef.SEPARATOR,
@@ -554,29 +562,27 @@ class FileList(QTreeView):
             self.emitNothingClicked()
 
     def highlightCounterpart(self, loc: NavLocator):
-        try:
-            row = self.flModel.getRowForFile(loc.path)
-        except KeyError:
-            row = -1
-        self._setCounterpart(row)
+        self._setCounterpart(loc.path)
 
-    def _setCounterpart(self, newRow: int):
+    def _setCounterpart(self, newPath: str):
         model = self.flModel
-        oldRow = model.highlightedCounterpartRow
+        oldPath = model.highlightedCounterpartPath
 
-        if oldRow == newRow:
+        if oldPath == newPath:
             return
 
-        model.highlightedCounterpartRow = newRow
+        model.highlightedCounterpartPath = newPath
 
-        if oldRow >= 0:
-            oldIndex = model.index(oldRow, 0)
-            self.update(oldIndex)
+        if oldPath:
+             oldIndex = model.getIndexForFile(oldPath)
+             if oldIndex.isValid():
+                 self.update(oldIndex)
 
-        if newRow >= 0:
-            newIndex = model.index(newRow, 0)
-            self.selectionModel().setCurrentIndex(newIndex, QItemSelectionModel.SelectionFlag.NoUpdate)
-            self.update(newIndex)
+        if newPath:
+             newIndex = model.getIndexForFile(newPath)
+             if newIndex.isValid():
+                 self.selectionModel().setCurrentIndex(newIndex, QItemSelectionModel.SelectionFlag.NoUpdate)
+                 self.update(newIndex)
 
     def getNavLocatorForIndex(self, index: QModelIndex):
         filePath = index.data(FileListModel.Role.FilePath)
@@ -607,9 +613,25 @@ class FileList(QTreeView):
         """ Override this if you want to react to a middle click. """
         pass
 
+    def _collectDeltas(self, rootIndex: QModelIndex) -> Generator[GitDelta, None, None]:
+        if not rootIndex.isValid():
+            return
+        delta = rootIndex.data(FileListModel.Role.Delta)
+        if delta is not None:
+            yield delta
+        else:
+            model = rootIndex.model()
+            for i in range(model.rowCount(rootIndex)):
+                yield from self._collectDeltas(model.index(i, 0, rootIndex))
+
     def selectedDeltas(self) -> Generator[GitDelta, None, None]:
+        seen = set()
         for index in self.selectedIndexes():
-            yield index.data(FileListModel.Role.Delta)
+            for delta in self._collectDeltas(index):
+                path = delta.new.path
+                if path not in seen:
+                    seen.add(path)
+                    yield delta
 
     def selectedPaths(self) -> Generator[str, None, None]:
         for index in self.selectedIndexes():
@@ -647,21 +669,20 @@ class FileList(QTreeView):
         if not file:
             return False
 
-        try:
-            row = self.flModel.getRowForFile(file)
-        except KeyError:
+        index = self.flModel.getIndexForFile(file)
+        if not index.isValid():
             return False
-
-        if self.selectionModel().isRowSelected(row):
+        if self.selectionModel().isSelected(index):
             # Re-selecting an already selected row may deselect it??
             return True
 
-        self.selectRow(row)
+        self.setCurrentIndex(index)
+        self.selectionModel().select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
         return True
 
-    def deltaForFile(self, file: str) -> GitDelta:
-        row = self.flModel.getRowForFile(file)
-        return self.flModel.deltas[row]
+    def deltaForFile(self, file: str) -> GitDelta | None:
+        node = self.flModel.fileNodes.get(file)
+        return node.delta if node else None
 
     def openHeadRevision(self):
         def run(delta: GitDelta):
@@ -686,11 +707,17 @@ class FileList(QTreeView):
                 self.openSubRepo.emit(delta.new.path)
 
     def searchRange(self, searchRange: range) -> QModelIndex | None:
-        model = self.model()  # to filter out hidden rows, don't use self.clModel directly
+        model = self.model()  # to filter out hidden rows, don't use self.flModel directly
 
         term = self.searchBar.searchTerm
         assert term
         assert term == term.lower(), "search term should have been sanitized"
+
+        if settings.prefs.pathDisplayStyle == PathDisplayStyle.Tree:
+            for path in self.flModel.fileNodes.keys():
+                if term in path.lower():
+                    return self.flModel.getIndexForFile(path)
+            return None
 
         for i in searchRange:
             index = model.index(i, 0)
@@ -735,9 +762,8 @@ class FileList(QTreeView):
             # Preparing a QItemSelection upfront mitigates the strange shift-select behavior.
             newItemSelection = QItemSelection()
             for path in paths:
-                with suppress(KeyError):
-                    row = flModel.fileRows[path]
-                    index = flModel.index(row, 0)
+                index = flModel.getIndexForFile(path)
+                if index.isValid():
                     newItemSelection.select(index, index)
             selectionModel.clearSelection()
             selectionModel.select(newItemSelection, SF.Rows | SF.Select)

@@ -132,15 +132,32 @@ def fileTooltip(repo: Repo, delta: GitDelta, navContext: NavContext, isCounterpa
     return text
 
 
+class FileNode:
+    def __init__(self, name: str, parent: FileNode | None, isFolder: bool):
+        self.name = name
+        self.parent = parent
+        self.isFolder = isFolder
+        self.children: list[FileNode] = []
+        self.delta: GitDelta | None = None
+        if parent and parent.fullPath:
+            self.fullPath = f"{parent.fullPath}/{name}"
+        else:
+            self.fullPath = name
+
+    def row(self):
+        if self.parent:
+            return self.parent.children.index(self)
+        return 0
+
+
 class FileListModel(QAbstractItemModel):
     class Role:
         Delta = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 0)
         FilePath = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 1)
-        Folder = Qt.ItemDataRole(Qt.ItemDataRole.UserRole + 2)
 
-    deltas: list[GitDelta]
-    fileRows: dict[str, int]
-    highlightedCounterpartRow: int
+    fileNodes: dict[str, FileNode]
+    rootNode: FileNode
+    highlightedCounterpartPath: str
     navContext: NavContext
 
     def __init__(self, parent: QWidget, navContext: NavContext):
@@ -159,27 +176,57 @@ class FileListModel(QAbstractItemModel):
         return parentWidget
 
     def clear(self):
-        self.deltas = []
-        self.fileRows = {}
-        self.highlightedCounterpartRow = -1
+        self.fileNodes = {}
+        self.rootNode = FileNode("", None, True)
+        self.highlightedCounterpartPath = ""
         self.modelReset.emit()
 
     def setContents(self, deltas: Iterable[GitDelta]):
         self.beginResetModel()
 
-        self.deltas.clear()
-        self.fileRows.clear()
+        self.fileNodes.clear()
+        self.rootNode = FileNode("", None, True)
 
         sortedDeltas = sorted(deltas, key=lambda d: naturalSort(d.new.path))
+        tree = settings.prefs.pathDisplayStyle == PathDisplayStyle.Tree
 
         for delta in sortedDeltas:
-            self.fileRows[delta.new.path] = len(self.deltas)
-            self.deltas.append(delta)
+            if not tree:
+                node = FileNode(delta.new.path, self.rootNode, False)
+                node.delta = delta
+                self.rootNode.children.append(node)
+                self.fileNodes[delta.new.path] = node
+            else:
+                parts = delta.new.path.split('/')
+                current = self.rootNode
+                for part in parts[:-1]:
+                    nextNode = None
+                    for child in current.children:
+                        if child.name == part and child.isFolder:
+                            nextNode = child
+                            break
+                    if not nextNode:
+                        nextNode = FileNode(part, current, True)
+                        current.children.append(nextNode)
+                        self.fileNodes[nextNode.fullPath] = nextNode
+                    current = nextNode
+
+                fname = parts[-1]
+                node = FileNode(fname, current, False)
+                node.delta = delta
+                current.children.append(node)
+                self.fileNodes[delta.new.path] = node
 
         self.endResetModel()
 
     def index(self, row: int, column: int = 0, parent: QModelIndex = QModelIndex_default) -> QModelIndex:
-        return self.createIndex(row, column)
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+
+        parentNode = parent.internalPointer() if parent.isValid() else self.rootNode
+        if row < len(parentNode.children):
+            return self.createIndex(row, column, parentNode.children[row])
+        return QModelIndex()
 
     @overload
     def parent(self, child: QModelIndex) -> QModelIndex: ...
@@ -188,81 +235,121 @@ class FileListModel(QAbstractItemModel):
     def parent(self) -> QObject | None: ...
 
     def parent(self, child: QModelIndex | None = None):
-        if isinstance(child, QModelIndex):
-            return QModelIndex_default
-        return super().parent()
+        if not isinstance(child, QModelIndex):
+            return super().parent()
+
+        if not child.isValid():
+            return QModelIndex()
+
+        childNode = child.internalPointer()
+        if not childNode:
+            return QModelIndex()
+
+        parentNode = childNode.parent
+
+        if parentNode == self.rootNode or parentNode is None:
+            return QModelIndex()
+
+        return self.createIndex(parentNode.row(), 0, parentNode)
 
     def columnCount(self, parent: QModelIndex = QModelIndex_default) -> int:
         return 1
 
     def rowCount(self, parent: QModelIndex = QModelIndex_default) -> int:
-        return len(self.deltas)
+        parentNode = parent.internalPointer() if parent.isValid() else self.rootNode
+        if parentNode is None:
+            return 0
+        return len(parentNode.children)
 
     def data(self, index: QModelIndex, role: Qt.ItemDataRole = Qt.ItemDataRole.DisplayRole) -> Any:
-        row = index.row()
-        try:
-            delta = self.deltas[row]
-        except IndexError:
-            delta = None
+        if not index.isValid():
+            return None
+
+        node: FileNode = index.internalPointer()
 
         if role == FileListModel.Role.Delta:
-            return delta
+            return node.delta
 
         elif role == FileListModel.Role.FilePath:
             # TODO: Canonical path for submodules?
-            return delta.new.path
+            return node.fullPath
 
         elif role == Qt.ItemDataRole.DisplayRole:
+            if node.isFolder:
+                return node.name
+
             # TODO: Canonical path for submodules?
-            text = abbreviatePath(delta.new.path, settings.prefs.pathDisplayStyle)
+            text = abbreviatePath(node.fullPath, settings.prefs.pathDisplayStyle)
 
             # Show important mode info in brackets
-            modeInfo = deltaModeText(delta.old.mode, delta.new.mode)
-            if modeInfo:
-                text = f"[{modeInfo}] {text}"
+            if node.delta:
+                modeInfo = deltaModeText(node.delta.old.mode, node.delta.new.mode)
+                if modeInfo:
+                    text = f"[{modeInfo}] {text}"
 
             return text
 
         elif role == Qt.ItemDataRole.DecorationRole:
-            letter = delta.status
-            if letter == "?":  # untracked, fake A
-                letter = "A"
-            letter = letter.lower()
-            return stockIcon(f"status_{letter}")
+            if node.isFolder:
+                return stockIcon("SP_DirIcon")
+            if node.delta:
+                letter = node.delta.status
+                if letter == "?":  # untracked, fake A
+                    letter = "A"
+                letter = letter.lower()
+                return stockIcon(f"status_{letter}")
+            return None
 
         elif role == Qt.ItemDataRole.ToolTipRole:
-            isCounterpart = row == self.highlightedCounterpartRow
-            return fileTooltip(self.repo, delta, self.navContext, isCounterpart)
+            isCounterpart = node.fullPath == self.highlightedCounterpartPath
+            if node.isFolder:
+                # TODO: Nicer tooltip for folders
+                return f"<b>{escape(node.fullPath)}</b>"
+            if node.delta:
+                return fileTooltip(self.repo, node.delta, self.navContext, isCounterpart)
+            return None
 
         elif role == Qt.ItemDataRole.SizeHintRole:
             return QSize(-1, self.parentWidget.fontMetrics().height())
 
         elif role == Qt.ItemDataRole.FontRole:
-            if row == self.highlightedCounterpartRow:
+            if node.fullPath == self.highlightedCounterpartPath:
                 font = self.parentWidget.font()
                 font.setUnderline(True)
                 return font
 
         return None
 
+    def deltaCount(self) -> int:
+        return sum(1 for delta in self.fileNodes.values() if delta.delta is not None)
+
+    def getIndexForFile(self, path: str) -> QModelIndex:
+        try:
+            node = self.fileNodes[path]
+            return self.createIndex(node.row(), 0, node)
+        except KeyError:
+            return QModelIndex()
+
     def getRowForFile(self, path: str) -> int:
         """
         Get the row number for the given path.
         Raise KeyError if the path is absent from this model.
         """
-        return self.fileRows[path]
+        node = self.fileNodes[path]
+        return node.row()
 
     def getFileAtRow(self, row: int) -> str:
         """
         Get the path corresponding to the given row number.
         Return an empty string if the row number is invalid.
         """
-        if row < 0 or row >= self.rowCount():
+        if row < 0 or row >= len(self.rootNode.children):
             return ""
-        return self.data(self.index(row), FileListModel.Role.FilePath)
+        node = self.rootNode.children[row]
+        return node.fullPath
 
     def hasFile(self, path: str) -> bool:
         """
         Return True if the given path is present in this model.
         """
-        return path in self.fileRows
+        return path in self.fileNodes

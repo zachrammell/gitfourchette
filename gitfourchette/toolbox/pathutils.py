@@ -15,6 +15,7 @@ class PathDisplayStyle(enum.IntEnum):
     AbbreviateDirs = 2
     FileNameOnly = 3
     FileNameFirst = 4
+    Tree = 5
 
 
 def compactPath(path: str) -> str:
@@ -39,7 +40,7 @@ def abbreviatePath(path: str, style: PathDisplayStyle = PathDisplayStyle.FullPat
         if len(split) == 1:
             return path
         return split[-1] + ' \0' + split[0]
-    elif style == PathDisplayStyle.FileNameOnly:
+    elif style == PathDisplayStyle.FileNameOnly or style == PathDisplayStyle.Tree:
         return path.rsplit('/', 1)[-1]
     else:
         return path

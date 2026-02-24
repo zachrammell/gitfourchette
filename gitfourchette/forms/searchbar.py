@@ -287,6 +287,7 @@ class SearchBar(QWidget):
             # A valid index was found in the range, select it
             if index is not None and index.isValid():
                 view.setCurrentIndex(index)
+                view.selectionModel().select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
                 return index
 
         # No valid index from this point on
@@ -332,6 +333,7 @@ class SearchBar(QWidget):
             if index is not None and index.isValid():
                 if self.selectNextOccurrenceOnPulse:
                     view.setCurrentIndex(index)
+                    view.selectionModel().select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
                 break
         else:
             self.setRed()

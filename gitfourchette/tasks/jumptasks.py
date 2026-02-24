@@ -21,6 +21,7 @@ from gitfourchette.diffview.specialdiff import SpecialDiffError, ImageDelta, Sam
 from gitfourchette.gitdriver import GitConflict, GitDelta, GitDriver, argsIf
 from gitfourchette.graphview.commitlogmodel import SpecialRow
 from gitfourchette.localization import *
+from gitfourchette.filelists.filelistmodel import FileListModel
 from gitfourchette.nav import NavLocator, NavContext, NavFlags
 from gitfourchette.porcelain import NULL_OID, Oid
 from gitfourchette.qt import *
@@ -163,6 +164,25 @@ class Jump(RepoTask):
             return Jump.Result(locator, "", None)
 
         delta = fileList.deltaForFile(locator.path)
+        childLocator = locator
+
+        if delta is None:
+            index = fileList.flModel.getIndexForFile(locator.path)
+            model = fileList.flModel
+            while index.isValid():
+                delta = index.data(FileListModel.Role.Delta)
+                if delta is not None:
+                    childLocator = locator.replace(path=delta.new.path)
+                    break
+                index = model.index(0, 0, index)
+
+        if delta is None:
+            header = ""
+            sde = SpecialDiffError(
+                _("{0} is empty", bquo(locator.path)),
+                _("This folder contains no changed files."))
+            return Jump.Result(locator, header, sde)
+
         assert delta.context == locator.context
 
         # If DiffView is already set up to display this specific patch,
@@ -172,7 +192,7 @@ class Jump(RepoTask):
             return Jump.Result(rw.diffView.currentLocator, "", SameTextDiff())
 
         # Load the patch
-        patchTask = yield from self.flowSubtask(LoadPatch, delta, locator)
+        patchTask = yield from self.flowSubtask(LoadPatch, delta, childLocator)
         return Jump.Result(locator, patchTask.header, patchTask.result, delta)
 
     def isDiffViewAlreadySetUpFor(self, locator: NavLocator, delta: GitDelta) -> bool:
@@ -245,8 +265,8 @@ class Jump(RepoTask):
                 rw.dirtyFiles.setContents(repoModel.workdirUnstagedDeltas)
                 rw.stagedFiles.setContents(repoModel.workdirStagedDeltas)
 
-            nDirty = rw.dirtyFiles.model().rowCount()
-            nStaged = rw.stagedFiles.model().rowCount()
+            nDirty = rw.dirtyFiles.model().deltaCount()
+            nStaged = rw.stagedFiles.model().deltaCount()
             rw.diffArea.dirtyHeader.setText(_n("Unstaged ({n})", "Unstaged ({n})", nDirty))
             rw.diffArea.stagedHeader.setText(_n("Staged ({n})", "Staged ({n})", nStaged))
             rw.diffArea.commitButton.setText(_n("Commit {n} file", "Commit {n} files", nStaged))
